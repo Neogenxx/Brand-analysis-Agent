@@ -5,7 +5,7 @@
 
 ---
 
-##  Quickstart (60 seconds — no API key needed)
+##  Quickstart 
 
 ```bash
 git clone <your-repo-url>
@@ -164,12 +164,6 @@ uvicorn api.main:app --reload --port 8000
 streamlit run dashboard/app.py
 ```
 
-### Option D — Pipeline only (no UI)
-
-```bash
-python run.py --pipeline-only
-```
-
 ---
 
 ## 📊 Dashboard views
@@ -184,7 +178,7 @@ python run.py --pipeline-only
 
 ---
 
-## 🤖 Sentiment methodology
+##  Sentiment methodology
 
 **Layer 1 — VADER (per review)**
 - Runs on every review body text
@@ -203,7 +197,7 @@ python run.py --pipeline-only
 
 ---
 
-## 📦 Dataset
+##  Dataset
 
 | File | Rows | Description |
 |---|---|---|
@@ -217,7 +211,7 @@ python run.py --pipeline-only
 
 ---
 
-## 📦 Brands tracked
+##  Brands tracked
 
 | Brand | Tier | Notes |
 |---|---|---|
@@ -230,7 +224,7 @@ python run.py --pipeline-only
 
 ---
 
-## ⚠️ Limitations
+##  Limitations
 
 - Sample data is synthetic — run the scraper for real Amazon India data
 - Amazon's anti-scraping measures may throttle or block the scraper
@@ -240,7 +234,7 @@ python run.py --pipeline-only
 
 ---
 
-## 🔮 Future improvements
+## Future improvements
 
 - Real-time data updates via scheduled scraping
 - Review trust scoring (fake review detection via repetition analysis)
@@ -249,18 +243,3 @@ python run.py --pipeline-only
 - Cloud deployment with autoscaling (Railway, Render, or AWS)
 
 ---
-
-## 📌 Evaluation rubric alignment
-
-| Criteria | How this project addresses it |
-|---|---|
-| Data collection (20) | Playwright scraper + clean CSV/JSON dataset |
-| Analytical depth (20) | VADER + LLM sentiment, aspect scoring, theme extraction |
-| Dashboard UX/UI (20) | 5-tab Streamlit UI with dynamic filters, charts, drilldowns |
-| Competitive intelligence (15) | Cross-brand benchmarking + non-obvious comparisons |
-| Technical execution (15) | Modular code, logging, error handling, documented methodology |
-| Product thinking (10) | Agent Insights — answers "why" not just "what" |
-
----
-
-*Built for the Moonshot AI Agent Internship — 2024*
