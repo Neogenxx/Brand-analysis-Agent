@@ -1,404 +1,224 @@
-"""
-Playwright based scraper for Amazon India luggage product listings and reviews.
-Handles anti-bot measures with random delays, realistic headers, and retry logic.
-Falls back to sample data if scraping fails consistently.
-"""
 import asyncio
 import json
 import random
 import re
+from urllib.parse import unquote
 from pathlib import Path
+from playwright.async_api import async_playwright
+from playwright_stealth import stealth
 
-from playwright.async_api import async_playwright, Page, TimeoutError as PWTimeout
-
-from utils.config import (
-    AMAZON_BASE_URL, BRANDS, BRAND_SEARCH_QUERIES,
-    DATA_RAW_PATH, PRODUCTS_PER_BRAND, MAX_REVIEW_PAGES,
-)
-from utils.logger import get_logger
-
-logger = get_logger("scraper")
+# ==========================================
+# CONFIGURATION
+# ==========================================
+BASE_URL = "https://www.amazon.in"
+BRANDS = ["Safari", "Skybags", "American Tourister", "VIP", "Aristocrat"]
+MAX_PRODUCTS_PER_BRAND = 10
+DATA_PATH = Path("data/raw/output.json")
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
 ]
 
+# ==========================================
+# ANTI-DETECTION HELPERS
+# ==========================================
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+async def delay(a=2, b=4):
+    """Randomized delay to mimic human hesitation."""
+    await asyncio.sleep(random.uniform(a, b))
 
-async def _delay(lo: float = 1.5, hi: float = 4.0):
-    await asyncio.sleep(random.uniform(lo, hi))
-
-
-def _parse_price(text: str) -> float:
-    cleaned = re.sub(r"[₹,\s\u20b9]", "", text or "")
+async def apply_stealth(page):
+    """Applies stealth and falls back to manual bypass if the module fails."""
     try:
-        return round(float(cleaned), 2)
-    except ValueError:
-        return 0.0
+        stealth(page)
+    except Exception:
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-
-def _parse_rating(text: str) -> float:
-    m = re.search(r"(\d+\.?\d*)\s*out\s*of\s*5", text or "")
-    if m:
-        return float(m.group(1))
-    m = re.search(r"(\d+\.?\d*)", text or "")
-    return float(m.group(1)) if m else 0.0
-
-
-def _parse_int(text: str) -> int:
-    cleaned = re.sub(r"[,\s]", "", text or "")
-    m = re.search(r"(\d+)", cleaned)
-    return int(m.group(1)) if m else 0
-
-
-def _parse_discount(text: str) -> float:
-    m = re.search(r"(\d+)\s*%", text or "")
-    return float(m.group(1)) if m else 0.0
-
-
-async def _is_captcha(page: Page) -> bool:
+async def handle_block(page):
+    """Detects CAPTCHAs and pauses the script for manual solving."""
     content = await page.content()
-    return any(kw in content for kw in ["Type the characters", "Enter the characters", "robot"])
-
-
-# ── Search page scraper ───────────────────────────────────────────────────────
-
-async def _scrape_search_page(page: Page, brand: str, query: str) -> list[dict]:
-    products: list[dict] = []
-
-    try:
-        # ✅ Step 1: Go to homepage (not search URL)
-        await page.goto("https://www.amazon.in", wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(3, 5))
-
-        # ✅ Step 2: Wait for search box
-        search_box = await page.wait_for_selector("input#twotabsearchtextbox", timeout=15000)
-
-        # ✅ Step 3: Clear + type like human
-        await search_box.click()
-        await asyncio.sleep(random.uniform(0.5, 1.2))
-
-        await search_box.fill("")  # clear if needed
-
-        for char in query:
-            await search_box.type(char, delay=random.randint(80, 150))  # human typing
-        await asyncio.sleep(random.uniform(0.5, 1.5))
-
-        # ✅ Step 4: Press Enter
-        await page.keyboard.press("Enter")
-
-        await page.wait_for_load_state("domcontentloaded")
-        await asyncio.sleep(random.uniform(3, 6))
-
-        # ✅ Step 5: Human scroll
-        for _ in range(3):
-            await page.mouse.wheel(0, random.randint(300, 700))
-            await asyncio.sleep(random.uniform(1, 2))
-
-        # 🔍 CAPTCHA check
-        if await _is_captcha(page):
-            logger.warning(f"CAPTCHA detected for {brand}. Waiting for manual solve...")
-            await page.wait_for_timeout(25000)  # give time to solve manually
-
-        items = await page.query_selector_all('[data-component-type="s-search-result"]')
-        logger.info(f"{brand} — found {len(items)} raw cards on search page")
-
-        for item in items:
-            try:
-                asin = await item.get_attribute("data-asin") or ""
-                if not asin:
-                    continue
-
-                title_el = await item.query_selector("h2 a span")
-                title    = (await title_el.inner_text()).strip() if title_el else ""
-
-                link_el  = await item.query_selector("h2 a")
-                href     = await link_el.get_attribute("href") if link_el else ""
-                url_prod = f"{AMAZON_BASE_URL}{href}" if href else ""
-
-                # Selling price (first offscreen price = current price)
-                price = 0.0
-
-                price_el = await item.query_selector(".a-price .a-offscreen")
-                if price_el:
-                    price = _parse_price(await price_el.inner_text())
-
-                # fallback
-                if price == 0:
-                    alt_price = await item.query_selector(".a-price-whole")
-                    if alt_price:
-                        price = _parse_price(await alt_price.inner_text())
-                        
-                # MRP (struck-through price)
-                mrp_el = await item.query_selector(".a-price.a-text-price .a-offscreen")
-                mrp    = _parse_price(await mrp_el.inner_text()) if mrp_el else price
-
-                # Ensure MRP >= price
-                if mrp < price:
-                    mrp = price
-
-                # Discount badge
-                disc_el   = await item.query_selector(".a-color-price")
-                disc_text = await disc_el.inner_text() if disc_el else ""
-                disc_pct  = _parse_discount(disc_text)
-                if not disc_pct and mrp > price > 0:
-                    disc_pct = round((1 - price / mrp) * 100, 1)
-
-                # Rating
-                rat_el   = await item.query_selector(".a-icon-alt")
-                rat_text = await rat_el.inner_text() if rat_el else ""
-                rating   = _parse_rating(rat_text)
-
-                # Review count
-                rev_el   = await item.query_selector('[aria-label*="ratings"]')
-                rev_text = await rev_el.get_attribute("aria-label") if rev_el else ""
-                rev_cnt  = _parse_int(rev_text)
-
-                if not title:
-                    continue
-
-                # allow missing price (fallback later)
-                if price == 0 and mrp > 0:
-                    price = mrp
-
-                products.append({
-                    "asin":          asin,
-                    "brand":         brand,
-                    "title":         title,
-                    "url":           url_prod,
-                    "price":         price,
-                    "mrp":           mrp,
-                    "discount_pct":  disc_pct,
-                    "rating":        rating,
-                    "review_count":  rev_cnt,
-                })
-
-                if len(products) >= PRODUCTS_PER_BRAND:
-                    break
-
-            except Exception as exc:
-                logger.debug(f"Card parse error: {exc}")
-
-        return products
-
-    except PWTimeout:
-        logger.error(f"Timeout loading search page for {brand}")
-        return []
-    except Exception as exc:
-        logger.error(f"Search page error for {brand}: {exc}")
-        return []
-
-
-# ── Review page scraper ───────────────────────────────────────────────────────
-
-async def _scrape_reviews(page: Page, product: dict) -> list[dict]:
-    reviews: list[dict] = []
-
-    if not product.get("url"):
-        return reviews
-
-    try:
-        # ✅ Step 1: Open product page
-        await page.goto(product["url"], wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(3, 6))
-
-        # ✅ Step 2: Human-like scroll (very important)
-        for _ in range(random.randint(2, 4)):
-            await page.mouse.wheel(0, random.randint(400, 900))
-            await asyncio.sleep(random.uniform(1, 2))
-
-        # ✅ Step 3: Random mouse movement
-        await page.mouse.move(random.randint(100, 600), random.randint(100, 600))
-
-        # CAPTCHA check
-        if await _is_captcha(page):
-            logger.warning(f"CAPTCHA on product {product['asin']} — waiting manual solve")
-            await page.wait_for_timeout(25000)
-
-        # ✅ Step 4: Scroll to reviews section
+    if "captcha" in content.lower() or "type the characters" in content.lower():
+        print("\n" + "="*50)
+        print("🚨 CAPTCHA DETECTED! PLEASE SOLVE IN THE BROWSER 🚨")
+        print("="*50 + "\n\a") 
         try:
-            await page.locator("#reviews-medley-footer").scroll_into_view_if_needed()
-            await asyncio.sleep(random.uniform(2, 4))
-        except:
-            pass
+            await page.wait_for_selector("form[action='/errors/validateCaptcha']", state="hidden", timeout=120000)
+            print("✔ CAPTCHA solved, resuming...")
+            await delay(2, 4)
+        except Exception:
+            print("❌ Failed to solve CAPTCHA in time.")
 
-        # ✅ Step 5: Click "See all reviews" (human-like)
-        see_all = await page.query_selector('[data-hook="see-all-reviews-link-foot"]')
-        if see_all:
-            await asyncio.sleep(random.uniform(1, 2))
-            await see_all.click()
-            await page.wait_for_load_state("domcontentloaded")
-            await asyncio.sleep(random.uniform(3, 5))
+# ==========================================
+# DATA CLEANING HELPERS
+# ==========================================
 
-        # CAPTCHA again
-        if await _is_captcha(page):
-            logger.warning(f"CAPTCHA after clicking reviews {product['asin']}")
-            await page.wait_for_timeout(25000)
+def clean_price(text):
+    if not text: return 0.0
+    text = re.sub(r"[₹,\s]", "", text)
+    try: return float(text)
+    except: return 0.0
 
-        # ✅ Step 6: Extract reviews with slow pagination
-        for _pg in range(MAX_REVIEW_PAGES):
+def clean_rating(text):
+    if not text: return 0.0
+    m = re.search(r"(\d+\.?\d*)", text)
+    return float(m.group(1)) if m else 0.0
 
-            # human scroll inside reviews page
-            for _ in range(random.randint(2, 3)):
-                await page.mouse.wheel(0, random.randint(300, 700))
-                await asyncio.sleep(random.uniform(1, 2))
+def clean_int(text):
+    if not text: return 0
+    clean_text = re.sub(r"[,\s\(\)]", "", text)
+    return int(clean_text) if clean_text.isdigit() else 0
 
-            rev_els = await page.query_selector_all('[data-hook="review"]')
+# ==========================================
+# EXTRACTION LOGIC
+# ==========================================
 
-            for rev_el in rev_els:
-                try:
-                    t_spans = await rev_el.query_selector_all('[data-hook="review-title"] span')
-                    rev_title = ""
-                    for sp in t_spans:
-                        txt = (await sp.inner_text()).strip()
-                        if txt and "out of 5" not in txt:
-                            rev_title = txt
-                            break
+async def extract_products(page, brand_name):
+    """Extracts products from the search results page."""
+    products = []
+    cards = await page.query_selector_all('div[data-component-type="s-search-result"]')
+    print(f"  Found {len(cards)} potential product cards on page.")
+    
+    for card in cards:
+        if len(products) >= MAX_PRODUCTS_PER_BRAND: break
+        try:
+            link_el = await card.query_selector("a.a-link-normal.s-line-clamp-2")
+            if not link_el: continue
+            
+            raw_href = await link_el.get_attribute("href")
+            if not raw_href: continue
 
-                    body_el = await rev_el.query_selector('[data-hook="review-body"] span')
-                    body = (await body_el.inner_text()).strip() if body_el else ""
+            full_url = f"{BASE_URL}{raw_href}" if raw_href.startswith("/") else raw_href
+            decoded_url = unquote(full_url)
+            
+            asin_match = re.search(r'/dp/([A-Z0-9]{10})', decoded_url)
+            asin = asin_match.group(1) if asin_match else None
+            
+            if not asin: continue
 
-                    rat_el = await rev_el.query_selector('[data-hook="review-star-rating"] .a-icon-alt')
-                    rat_txt = await rat_el.inner_text() if rat_el else ""
-                    rating = _parse_rating(rat_txt)
+            title_el = await card.query_selector("h2 span")
+            price_el = await card.query_selector(".a-price-whole")
+            rating_el = await card.query_selector("i.a-icon-star-small .a-icon-alt, i.a-icon-star .a-icon-alt")
+            review_el = await card.query_selector("span.a-size-base.s-underline-text")
 
-                    if not body:
-                        continue
-
-                    reviews.append({
-                        "asin": product["asin"],
-                        "brand": product["brand"],
-                        "product_title": product["title"],
-                        "title": rev_title,
-                        "body": body,
-                        "rating": rating,
-                    })
-
-                except Exception as exc:
-                    logger.debug(f"Review parse error: {exc}")
-
-            # ✅ Step 7: Human-like pagination
-            next_btn = await page.query_selector(".a-pagination .a-last:not(.a-disabled) a")
-
-            if next_btn:
-                await asyncio.sleep(random.uniform(2, 4))
-
-                # move mouse before clicking
-                await page.mouse.move(random.randint(200, 800), random.randint(200, 600))
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-
-                await next_btn.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(random.uniform(3, 6))
-            else:
-                break
-
-        logger.info(f"{product['asin']} — scraped {len(reviews)} reviews")
-        return reviews
-
-    except Exception as exc:
-        logger.error(f"Review scrape error {product['asin']}: {exc}")
-        return reviews
-
-
-# ── Main entry point ──────────────────────────────────────────────────────────
-
-async def run_scraper(brands: list[str] | None = None):
-    if brands is None:
-        brands = BRANDS
-
-    DATA_RAW_PATH.mkdir(parents=True, exist_ok=True)
-    all_data: dict = {}
-
-    async with async_playwright() as pw:
-
-        # Use persistent context (IMPORTANT)
-        context = await pw.chromium.launch_persistent_context(
-            user_data_dir="user_data",   # stores cookies/session
-            headless=False,              # MUST be False
-            args=[
-                "--start-maximized",
-                "--disable-blink-features=AutomationControlled",
-            ],
-            viewport=None,
-            locale="en-IN",
-        )
-
-        # Mask automation
-        await context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
-
-        page = context.pages[0] if context.pages else await context.new_page()
-
-        # Warm-up browsing (VERY IMPORTANT)
-        await page.goto("https://www.google.com")
-        await asyncio.sleep(random.uniform(2, 4))
-
-        for brand in brands:
-            logger.info(f"\n{'─'*55}")
-            logger.info(f"Brand: {brand}")
-            logger.info(f"{'─'*55}")
-
-            # Rotate user-agent per brand
-            await context.set_extra_http_headers({
-                "User-Agent": random.choice(USER_AGENTS),
-                "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8"
+            products.append({
+                "brand": brand_name,
+                "asin": asin,
+                "title": (await title_el.inner_text()).strip() if title_el else "Unknown",
+                "price": clean_price(await price_el.inner_text() if price_el else ""),
+                "rating": clean_rating(await rating_el.get_attribute("innerHTML") if rating_el else ""),
+                "review_count": clean_int(await review_el.inner_text() if review_el else ""),
+                "url": f"https://www.amazon.in/dp/{asin}" 
             })
+            print(f"   ✔ Found: {asin}")
+        except Exception:
+            continue
+    return products
 
-            query = BRAND_SEARCH_QUERIES.get(brand, f"{brand} luggage trolley bag")
+async def extract_reviews(context, asin):
+    """Directly visits the review page using the ASIN with a retry mechanism."""
+    reviews = []
+    if not asin: return []
+    
+    review_url = f"https://www.amazon.in/product-reviews/{asin}/?reviewerType=all_reviews"
+    
+    for attempt in range(2):
+        page = await context.new_page()
+        await page.set_extra_http_headers({"User-Agent": random.choice(USER_AGENTS)})
+        await apply_stealth(page)
 
-            # Human-like delay before search
-            await asyncio.sleep(random.uniform(2, 5))
+        try:
+            print(f"    → Navigating to reviews for {asin} (Attempt {attempt + 1})...")
+            await page.goto(review_url, wait_until="commit", timeout=60000)
+            await page.wait_for_load_state("domcontentloaded")
+            
+            if "ap/signin" in page.url:
+                print(f"    🚨 REDIRECTED TO LOGIN! Pausing for 15s to let things cool down...")
+                await asyncio.sleep(15) 
+                return [] 
 
-            products = await _scrape_search_page(page, brand, query)
+            await handle_block(page)
 
-            # Handle CAPTCHA (manual fallback)
-            if not products:
-                logger.warning(f"No products for {brand}. Check for CAPTCHA manually.")
-                await page.wait_for_timeout(20000)  # 20 sec to solve CAPTCHA
-                products = await _scrape_search_page(page, brand, query)
+            for p in range(2):
+                await page.wait_for_selector('[data-hook="review"]', timeout=10000)
+                blocks = await page.query_selector_all('[data-hook="review"]')
+                
+                for r in blocks:
+                    body = await r.query_selector('[data-hook="review-body"]')
+                    if body:
+                        text = await body.inner_text()
+                        reviews.append({"asin": asin, "text": text.strip()})
 
-            if not products:
-                logger.warning(f"Still no data for {brand} — skipping")
-                all_data[brand] = {"products": [], "reviews": []}
-                continue
-
-            brand_reviews: list[dict] = []
-
-            for product in products:
-                # Human delay
-                await asyncio.sleep(random.uniform(2, 5))
-
-                # Random mouse movement
-                await page.mouse.move(random.randint(100, 500), random.randint(100, 500))
-
-                revs = await _scrape_reviews(page, product)
-                brand_reviews.extend(revs)
-
-                if len(brand_reviews) >= 80:
-                    logger.info(f"Reached 80 reviews for {brand}, stopping early")
+                next_btn = await page.query_selector("li.a-last a")
+                if next_btn and len(reviews) < 20:
+                    await next_btn.click()
+                    await page.wait_for_load_state("domcontentloaded")
+                    await delay(3, 5) 
+                else:
                     break
+            
+            break 
+            
+        except Exception as e:
+            if "Timeout" in str(e) and attempt == 1:
+                pass
+            elif "Timeout" not in str(e):
+                print(f"    ⚠ Network interrupted: {str(e).splitlines()[0]}")
+                await asyncio.sleep(3) 
+        finally:
+            if not page.is_closed():
+                await page.close()
+                
+    return reviews
 
-            all_data[brand] = {"products": products, "reviews": brand_reviews}
+# ==========================================
+# MAIN EXECUTION PIPELINE
+# ==========================================
 
-            out = DATA_RAW_PATH / f"{brand.lower().replace(' ', '_')}.json"
-            out.write_text(json.dumps(all_data[brand], indent=2, ensure_ascii=False))
+async def run_scraper():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch_persistent_context(
+            user_data_dir="user_data",
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
 
-            logger.info(
-                f"Saved: {len(products)} products | {len(brand_reviews)} reviews → {out.name}"
-            )
+        all_products = []
+        all_reviews = []
 
-            #  Long pause between brands
-            await asyncio.sleep(random.uniform(5, 10))
+        for brand in BRANDS:
+            print(f"\n{'='*50}\n▶ Extracting Brand: {brand}\n{'='*50}")
+            
+            page = await browser.new_page()
+            await apply_stealth(page)
+            
+            search_url = f"{BASE_URL}/s?k={brand.replace(' ', '+')}+trolley+bag"
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await delay()
+            await handle_block(page)
+            
+            products = await extract_products(page, brand)
+            
+            for product in products:
+                print(f"  ☕ Cooling down for a few seconds...")
+                await asyncio.sleep(random.uniform(5, 10)) 
+                
+                p_reviews = await extract_reviews(browser, product["asin"])
+                
+                all_products.append(product)
+                all_reviews.extend(p_reviews)
+                
+                DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with open(DATA_PATH, "w", encoding="utf-8") as f:
+                    json.dump({"products": all_products, "reviews": all_reviews}, f, indent=2, ensure_ascii=False)
 
-        await context.close()
+            await page.close()
 
-    logger.info("\nScraping complete.")
-    return all_data
+        await browser.close()
+        print(f"\n✔ Success! Scraped {len(all_products)} products and {len(all_reviews)} reviews.")
+        print(f"✔ Data saved to: {DATA_PATH.absolute()}")
 
 if __name__ == "__main__":
     asyncio.run(run_scraper())
