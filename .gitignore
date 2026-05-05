@@ -1,1 +1,12 @@
+# Ignore the browser session data
+user_data/
+
+# Ignore Python virtual environments
 venvagent/
+__pycache__/
+*.pyc
+
+# Ignore the scraped data (optional)
+data/raw/*.json
+
+.env/
