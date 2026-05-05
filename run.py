@@ -1,6 +1,4 @@
 """
-run.py  —  Brand Analysis Agent launcher
------------------------------------------
 Usage:
   python run.py                  → generate sample data + launch dashboard
   python run.py --scrape         → run live scraper + full pipeline + launch dashboard
@@ -21,10 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 def _banner():
     print("""
-╔════════════════════════════════════════════════╗
-║          🧳  Brand Analysis Agent  🧳           ║
-║   Competitive Intelligence — Amazon India      ║
-╚════════════════════════════════════════════════╝
+              Brand Analysis Agent 
 """)
 
 
@@ -127,7 +122,7 @@ def main():
     run_pipeline()
 
     if args.pipeline_only or args.no_ui:
-        print("\n✅  Pipeline complete. Data saved to data/processed/")
+        print("\n  Pipeline complete. Data saved to data/processed/")
         return
 
     # Launch dashboard
