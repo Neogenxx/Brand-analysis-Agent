@@ -1,4 +1,4 @@
-# 🧳 Brand Analysis Agent
+# Brand Analysis Agent
 
 > **Competitive intelligence dashboard for luggage brands on Amazon India**
 
@@ -117,7 +117,7 @@ brand_analysis_agent/
 
 ---
 
-##  Setup (full install)
+##  Setup
 
 ### 1. Install dependencies
 
@@ -140,7 +140,7 @@ cp .env.example .env
 
 ---
 
-## ▶️ Running the project
+##  Running the project
 
 ### Option A — Sample data (no API key, instant)
 
@@ -166,7 +166,7 @@ streamlit run dashboard/app.py
 
 ---
 
-## 📊 Dashboard views
+## Dashboard views
 
 | Tab | What it shows |
 |---|---|
